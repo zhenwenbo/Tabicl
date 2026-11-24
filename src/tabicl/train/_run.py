@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import csv
 import os
 import timeit
 import warnings
 import functools
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import math
 import numpy as np
@@ -532,6 +535,36 @@ class Trainer:
         np.random.seed(self.config.np_seed + seed_offset + self.curr_step)
         torch.manual_seed(self.config.torch_seed + seed_offset + self.curr_step)
 
+    @contextmanager
+    def _metrics_writer(self):
+        """Write metrics on rank zero, retaining only checkpointed history on resume."""
+        metrics_path = getattr(self.config, "metrics_csv", None)
+        if not self.master_process or not metrics_path:
+            yield None
+            return
+
+        path = Path(metrics_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        header = ["step", "loss", "accuracy", "lr", "prior_time", "train_time"]
+        with TemporaryDirectory(dir=path.parent) as directory:
+            trimmed = Path(directory) / path.name
+            with trimmed.open("w", encoding="utf-8", newline="") as output:
+                writer = csv.writer(output)
+                writer.writerow(header)
+                if path.exists():
+                    with path.open(encoding="utf-8", newline="") as previous:
+                        rows = csv.reader(previous)
+                        if next(rows, header) != header:
+                            raise ValueError(f"Unexpected metrics CSV header in {path}")
+                        for row in rows:
+                            if len(row) != len(header) or int(row[0]) > self.curr_step:
+                                break
+                            writer.writerow(row)
+            trimmed.replace(path)
+
+        with path.open("a", encoding="utf-8", newline="", buffering=1) as output:
+            yield csv.writer(output)
+
     @ddp_cleanup
     def train(self):
         """Main training loop.
@@ -545,46 +578,54 @@ class Trainer:
         else:
             step_progress = range(self.curr_step, self.config.max_steps)
 
-        dataloader = iter(self.dataloader)
-        for step in step_progress:
-            # Get the next batch
-            with Timer() as prior_timer:
-                batch = next(dataloader)
-            prior_time = prior_timer.elapsed
+        with self._metrics_writer() as metrics_writer:
+            dataloader = iter(self.dataloader)
+            for step in step_progress:
+                # Get the next batch
+                with Timer() as prior_timer:
+                    batch = next(dataloader)
+                prior_time = prior_timer.elapsed
 
-            # Train the model on the batch
-            with Timer() as train_timer:
-                results = self.run_batch(batch)
-            train_time = train_timer.elapsed
+                # Train the model on the batch
+                if metrics_writer is not None:
+                    step_lr = self.scheduler.get_last_lr()[0]
+                with Timer() as train_timer:
+                    results = self.run_batch(batch)
+                train_time = train_timer.elapsed
 
-            # Clear CUDA cache to free memory
-            torch.cuda.empty_cache()
+                # Clear CUDA cache to free memory
+                torch.cuda.empty_cache()
 
-            self.curr_step = step + 1
-            if self.master_process:
-                # Add timing information to results
-                results.update({"prior_time": prior_time, "train_time": train_time})
+                self.curr_step = step + 1
+                if self.master_process:
+                    # Add timing information to results
+                    results.update({"prior_time": prior_time, "train_time": train_time})
+                    if metrics_writer is not None:
+                        loss = results["pinball" if self.regression else "ce"]
+                        metrics_writer.writerow(
+                            (self.curr_step, loss, results.get("accuracy"), step_lr, prior_time, train_time)
+                        )
 
-                # Update progress bar with rounded values for cleaner display
-                step_progress.set_postfix(**{k: round(v, 3) if isinstance(v, float) else v for k, v in results.items()})
+                    # Update progress bar with rounded values for cleaner display
+                    step_progress.set_postfix(**{k: round(v, 3) if isinstance(v, float) else v for k, v in results.items()})
 
-                # Save checkpoints
-                is_temp_save = self.curr_step % self.config.save_temp_every == 0
-                is_perm_save = self.curr_step % self.config.save_perm_every == 0
+                    # Save checkpoints
+                    is_temp_save = self.curr_step % self.config.save_temp_every == 0
+                    is_perm_save = self.curr_step % self.config.save_perm_every == 0
 
-                if is_temp_save or is_perm_save:
-                    ckpt_name = f"step-{self.curr_step}.ckpt"
-                    self.save_checkpoint(name=ckpt_name)
+                    if is_temp_save or is_perm_save:
+                        ckpt_name = f"step-{self.curr_step}.ckpt"
+                        self.save_checkpoint(name=ckpt_name)
 
-                    # Manage checkpoint limit only for temporary checkpoints
-                    if is_temp_save and not is_perm_save and self.config.max_checkpoints > 0:
-                        self.manage_checkpoint()
+                        # Manage checkpoint limit only for temporary checkpoints
+                        if is_temp_save and not is_perm_save and self.config.max_checkpoints > 0:
+                            self.manage_checkpoint()
 
-            # Logging to Weights & Biases
-            if self.wandb_run is not None:
-                # Add learning rate to results
-                results["lr"] = self.scheduler.get_last_lr()[0]
-                wandb.log(results, step=self.curr_step)
+                # Logging to Weights & Biases
+                if self.wandb_run is not None:
+                    # Add learning rate to results
+                    results["lr"] = self.scheduler.get_last_lr()[0]
+                    wandb.log(results, step=self.curr_step)
 
     def validate_micro_batch(self, micro_seq_len, micro_train_size):
         """Validate consistent sequence length and train size within a micro batch.

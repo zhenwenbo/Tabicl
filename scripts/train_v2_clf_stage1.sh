@@ -21,12 +21,13 @@
 # v2 uses standard residual init (--zero_init False; v1 zero-initializes residual
 # branches) and enables FlashAttention-3 only in stages 2 & 3 (--use_flash_attn3).
 #
-# Adjust the placeholder paths and --nproc_per_node / --n_jobs for your hardware.
+# Set CHECKPOINT_ROOT, NUM_GPUS, and N_JOBS for your hardware.
 
-NUM_GPUS=4                                   # the paper used 4 GPUs for pre-training
-CKPT_DIR=/path/to/checkpoints/tabiclv2-clf/stage1
+NUM_GPUS=${NUM_GPUS:-4}                       # the paper used 4 GPUs for pre-training
+CHECKPOINT_ROOT=${CHECKPOINT_ROOT:-/path/to/checkpoints/tabiclv2-clf}
+CKPT_DIR="$CHECKPOINT_ROOT/stage1"
 
-torchrun --standalone --nproc_per_node=$NUM_GPUS -m tabicl.train \
+torchrun --standalone --nproc_per_node="$NUM_GPUS" -m tabicl.train \
             --wandb_log False \
             --wandb_project TabICLv2 \
             --wandb_name tabiclv2_clf_stage1 \
@@ -50,7 +51,7 @@ torchrun --standalone --nproc_per_node=$NUM_GPUS -m tabicl.train \
             --gradient_clipping 10.0 \
             --prior_type graph_scm \
             --prior_device cpu \
-            --n_jobs 16 \
+            --n_jobs "${N_JOBS:-16}" \
             --batch_size_per_gp 4 \
             --min_features 1 \
             --max_features 100 \
@@ -88,7 +89,8 @@ torchrun --standalone --nproc_per_node=$NUM_GPUS -m tabicl.train \
             --norm_first True \
             --zero_init False \
             --use_flash_attn3 False \
-            --checkpoint_dir $CKPT_DIR \
+            --checkpoint_dir "$CKPT_DIR" \
+            --metrics_csv "${METRICS_CSV:-}" \
             --save_temp_every 500 \
             --save_perm_every 5000
 

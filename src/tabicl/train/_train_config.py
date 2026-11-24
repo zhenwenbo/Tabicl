@@ -56,6 +56,7 @@ def build_parser():
     parser.add_argument(
         "--wandb_mode", default="offline", type=str, help="Wandb logging mode: online, offline, or disabled"
     )
+    parser.add_argument("--metrics_csv", default=None, type=str, help="Path to write per-step training metrics as CSV")
 
     ###########################################################################
     ###### Training Config ####################################################

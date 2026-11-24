@@ -7,23 +7,24 @@
 # checkpoint (weights only). FlashAttention-3 is enabled (--use_flash_attn3 True)
 # for stages 2 & 3 only.
 #
-# Adjust the placeholder paths and --nproc_per_node / --n_jobs for your hardware.
+# Set CHECKPOINT_ROOT, NUM_GPUS, and N_JOBS for your hardware.
 
-NUM_GPUS=4                                   # the paper used 4 GPUs for pre-training
-CKPT_DIR=/path/to/checkpoints/tabiclv2-clf/stage2
-STAGE1_CKPT=/path/to/checkpoints/tabiclv2-clf/stage1/step-500000.ckpt
+NUM_GPUS=${NUM_GPUS:-4}                       # the paper used 4 GPUs for pre-training
+CHECKPOINT_ROOT=${CHECKPOINT_ROOT:-/path/to/checkpoints/tabiclv2-clf}
+CKPT_DIR="$CHECKPOINT_ROOT/stage2"
+STAGE1_CKPT="$CHECKPOINT_ROOT/stage1/step-500000.ckpt"
 
 # Load the Stage 1 weights only on the very first launch. On later launches (e.g.
 # restarts after a cluster time limit), CKPT_DIR already contains Stage 2
 # checkpoints, and the trainer instead resumes from the latest one with full
 # optimizer/scheduler state (--checkpoint_path would override that, so it must
 # only be passed the first time).
-RESUME_ARGS="--checkpoint_path $STAGE1_CKPT --only_load_model True"
-if ls "$CKPT_DIR"/step-*.ckpt >/dev/null 2>&1; then
-    RESUME_ARGS=""
+RESUME_ARGS=()
+if ! ls -- "$CKPT_DIR"/step-*.ckpt >/dev/null 2>&1; then
+    RESUME_ARGS=(--checkpoint_path "$STAGE1_CKPT" --only_load_model True)
 fi
 
-torchrun --standalone --nproc_per_node=$NUM_GPUS -m tabicl.train \
+torchrun --standalone --nproc_per_node="$NUM_GPUS" -m tabicl.train \
             --wandb_log False \
             --wandb_project TabICLv2 \
             --wandb_name tabiclv2_clf_stage2 \
@@ -47,7 +48,7 @@ torchrun --standalone --nproc_per_node=$NUM_GPUS -m tabicl.train \
             --gradient_clipping 10.0 \
             --prior_type graph_scm \
             --prior_device cpu \
-            --n_jobs 16 \
+            --n_jobs "${N_JOBS:-16}" \
             --batch_size_per_gp 1 \
             --min_features 1 \
             --max_features 100 \
@@ -87,7 +88,8 @@ torchrun --standalone --nproc_per_node=$NUM_GPUS -m tabicl.train \
             --norm_first True \
             --zero_init False \
             --use_flash_attn3 True \
-            --checkpoint_dir $CKPT_DIR \
-            $RESUME_ARGS \
+            --checkpoint_dir "$CKPT_DIR" \
+            --metrics_csv "${METRICS_CSV:-}" \
+            "${RESUME_ARGS[@]}" \
             --save_temp_every 50 \
             --save_perm_every 1000
